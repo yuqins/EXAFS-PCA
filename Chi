@@ -1,0 +1,839 @@
+import os # needed system utils
+import numpy as np # for array processing
+import math
+import pandas as pd
+from pandas import Series, DataFrame 
+import matplotlib as mpl # for plot data
+import matplotlib.pylab as plt
+from matplotlib.pyplot import figure
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib import cm
+from mpl_toolkits.mplot3d import Axes3D
+from scipy import stats
+from scipy.cluster.vq import kmeans, vq, whiten
+from matplotlib.ticker import FuncFormatter
+mpl.rc('font',family='Times New Roman')
+plt.rcParams.update({'figure.max_open_warning': 0})
+
+# read in csv file that have cubic chi data for CCWT-EXAFS
+# read in csv file that have other data for more data
+kdata = pd.read_csv('ChiV3.csv')
+odata = pd.read_csv('otherV3.csv')
+#Re-update the csv file and fix the n=86 
+n = np.shape(kdata)[0] # n=86 line
+sampleArray = np.arange(0,n-16) + 1 
+#n-16 is the stds 
+stdArray = np.arange(0,16) + 1 
+# have 16 stds now
+dk, kmin, kmax = 0.05, 2, 12.55 
+k = np.arange(kmin, kmax, dk) 
+# k=[2 2.05 2.1 ... 12.45 12.5]
+N = len(k) 
+#N = 211
+# What's Rmin and Rmax?
+Rmin, Rmax = 0, 9.970875121 
+# settings of figure as pdf file
+CCWT = PdfPages('PCA_Yinchuan_V3.pdf')
+plt.close('all') # close all latent plotting windows
+
+fig = figure(figsize=(5.5, 4))
+fig.clf()
+plt.subplot(3,1,1)
+
+for i in range(0,kdata[kdata.Site=='YCA'].shape[0]):# here: 
+    plt.plot(k, kdata[kdata.Site=='YCA'].iloc[i,2:], '-') 
+plt.xlabel(r'$x: k \,(\AA^{-1})$', fontsize = 18) 
+plt.ylabel(r'$y: k^3\chi(k) \, (\AA^{-3})$', fontsize = 18)
+plt.tick_params(axis='both', labelsize=15)
+plt.xticks(rotation=30)
+plt.xticks(np.arange(1, 13, 1.0))
+plt.xlim(kmin,kmax)
+plt.ylim(-6,6) 
+plt.title("YCA\n", fontsize=22)
+plt.tight_layout()
+CCWT.savefig() # save the figure in PDF
+
+for i in range(0,kdata[kdata.Site=='YCB'].shape[0]):
+    plt.plot(k, kdata[kdata.Site=='YCB'].iloc[i,2:], '-')
+plt.xlabel(r'$x: k \,(\AA^{-1})$', fontsize = 18) 
+plt.ylabel(r'$y: k^3\chi(k) \, (\AA^{-3})$', fontsize = 18)
+plt.tick_params(axis='both', labelsize=15)
+plt.xticks(rotation=30)
+plt.xticks(np.arange(1, 13, 1.0))
+plt.xlim(kmin,kmax)
+plt.ylim(-6,6) 
+plt.title("YCB\n", fontsize=22)
+plt.tight_layout()
+CCWT.savefig() # save the figure in PDF
+
+###############################################################################################################
+##                                                   CCWT-EXAFS                                              ##
+###############################################################################################################
+def cauchy_wavelet(k, chi=None, kweight=0, rmax_out=10, nfft=2048):
+    # k:        1-d array of photo-electron wavenumber in Ang^-1 or group
+    # chi:      1-d array of chi
+    # rmax_out: highest R for output data (10 Ang)
+    # kweight:  exponent for weighting spectra by k**kweight
+    # nfft:     value to use for N_fft (2048)
+    kstep = np.round(1000.*(k[1]-k[0]))/1000.0 
+    rstep = (np.pi/2048)/kstep
+    rmin = 1.e-7
+    rmax = rmax_out
+    nrpts = int(np.round((rmax-rmin)/rstep))
+    nkout = len(k)      
+    # r                  uniform array of R, out to rmax_out.
+    # wcauchy            complex cauchy wavelet(k, R) =  out
+    # wcauchy_mag        magnitude of wavelet(k, R) =  np.abs(out) = np.sqrt(out.real**2 + out.imag**2)
+    # wcauchy_re         real part of wavelet(k, R) =  out.real
+    # wcauchy_im         imaginary part of wavelet(k, R)=  out.imag
+    if kweight != 0:
+    # if kweight = 0, then aleady k-weighted chi data
+    # if kweight != 0, then original chi data
+       chi = chi * k**kweight
+
+    NFT = int(nfft/2)
+    # extend EXAFS to 1024 data points
+    if len(k) < NFT:
+        knew = np.arange(NFT) * kstep
+        xnew = np.zeros(NFT) * kstep
+        xnew[:len(k)] = chi
+    else:
+        knew = k[:NFT]
+        xnew = chi[:NFT]
+    
+    # FT parameters
+    freq = (1.0/kstep)*np.arange(nfft)/(2*nfft)
+    omega = 2*np.pi*freq
+
+    # simple FT calculation
+    tff = np.fft.fft(xnew, n= 2*nfft)
+
+    # scale parameter
+    r  = np.linspace(0, rmax, nrpts)
+    r[0] = 1.e-19
+    a  = nrpts/(2*r)
+
+    # Characteristic values for Cauchy wavelet:
+    cauchy_sum = np.log(2*np.pi) - np.log(1.0+np.arange(nrpts)).sum()
+
+    # Main calculation:
+    out = np.zeros(nkout*nrpts,dtype='complex128').reshape(nrpts, nkout)
+    for i in range(nrpts):
+        aom = a[i]*omega
+        aom[np.where(aom==0)] = 1.e-19
+        filt = cauchy_sum + nrpts*np.log(aom) - aom
+        tmp  = np.conj(np.exp(filt))*tff[:nfft]
+        out[i, :] = np.fft.ifft(tmp, 2*nfft)[:nkout]
+
+    return r, out
+
+
+#ff = input('''1 = cubic chi, other = CCWT-EXAFS: ''' )
+ff = 1
+if ff !=1:
+    gg = input('''1 = 1st shell, 2 = 2nd shell, other = entire range: ''' )
+
+    if gg == 1:
+        M, P = 66, 0
+    elif gg == 2:
+        M, P = 66, 65
+    else:
+        M, P = 325, 0
+
+    data_Cauchy = np.empty((n,M*N))
+    STD_Cauchy = np.empty((16,M*N))
+
+    tt = input('''0 = magnitude, other = real: ''' )
+
+    if tt == 0:
+        for i in range(0,n-16):
+            chi3Array = kdata.iloc[i,2:] # get the original chi data
+            R, Cauchy = cauchy_wavelet(k = k, chi = chi3Array, kweight = 0, rmax_out = Rmax, nfft = 2048) # do CCWT-EXAFS
+            for j in range(P,(P+M)):
+                data_Cauchy[i, (j-P)*N:(j-P+1)*N] = np.abs(Cauchy)[j, :]
+
+        for i in range(n-16,n):
+            chi3Array = kdata.iloc[i,2:] # get the original chi data
+            R, Cauchy = cauchy_wavelet(k = k, chi = chi3Array, kweight = 0, rmax_out = Rmax, nfft = 2048) # do CCWT-EXAFS
+            for j in range(P,(P+M)):
+                STD_Cauchy[(i-n+16), (j-P)*N:(j-P+1)*N] = np.abs(Cauchy)[j, :]
+    else:
+        for i in range(0,n-16):
+            chi3Array = kdata.iloc[i,2:] # get the original chi data
+            R, Cauchy = cauchy_wavelet(k = k, chi = chi3Array, kweight = 0, rmax_out = Rmax, nfft = 2048) # do CCWT-EXAFS
+            for j in range(P,(P+M)):
+                data_Cauchy[i, (j-P)*N:(j-P+1)*N] = Cauchy.real[j, :]
+
+        for i in range(n-16,n):
+            chi3Array = kdata.iloc[i,2:] # get the original chi data
+            R, Cauchy = cauchy_wavelet(k = k, chi = chi3Array, kweight = 0, rmax_out = Rmax, nfft = 2048) # do CCWT-EXAFS
+            for j in range(P,(P+M)):
+                STD_Cauchy[(i-n+16), (j-P)*N:(j-P+1)*N] = Cauchy.real[j, :]
+
+###############################################################################################################
+##                                   Singular Value Decomposition (SVD)                                      ##
+###############################################################################################################
+# construct your numpy array of data
+if ff == 1:
+    data = kdata.iloc[0:(n-16),2:]
+else:
+    data = data_Cauchy
+
+U, s, V = np.linalg.svd(data, full_matrices=False)
+S = np.diag(s)
+V[0] = V[0]*(-1) # rotate PC1
+U[:,0] = U[:,0]*(-1) # rotate PC1
+
+# this will return an array of variance percentages for each component
+percent = s/sum(s)
+cumperc = np.cumsum(s)/sum(s)
+
+fig = figure(figsize=(5.5, 4))
+fig.clf()
+
+plt.plot(sampleArray, cumperc*100, 'o-')# label the axes 
+plt.xlabel("x: index, i", fontsize = 18) 
+plt.ylabel("y: cum_percentage(i), %", fontsize = 18)
+plt.tick_params(axis='x', labelsize=16)
+plt.tick_params(axis='y', labelsize=16)
+plt.xlim(0, n)
+plt.ylim(0, 102)
+
+fig.tight_layout()
+CCWT.savefig() # save the figures
+
+marker = ['o', 's', '^', 'd']
+color = ['dimgray', 'indianred', 'skyblue', 'gold']
+
+# this will return weights of input vectors
+if ff == 1:
+    F = V
+
+    fig = figure(figsize=(5.5, 5))
+    fig.clf()
+
+    plt.plot(k, F[0], '-', color = color[0], marker = marker[0], markersize=6, label='PC #1')
+    plt.xlabel(r'$x: k \,(\AA^{-1})$', fontsize = 26) 
+    plt.ylabel(r'$y: k^3\chi(k) \, (\AA^{-3})$', fontsize = 26)
+    plt.tick_params(axis='x', labelsize=22)
+    plt.xticks(rotation=30)
+    plt.xticks(np.arange(1, 13, 1.0))
+    plt.tick_params(axis='y',       # changes apply to the x-axis
+        which='both',               # both major and minor ticks are affected
+        left='off',                 # ticks along the bottom edge are off
+        right='off',                # ticks along the top edge are off
+        labelleft='off')
+    plt.xlim(kmin,kmax)
+    plt.legend(fontsize = 22)
+
+    fig.tight_layout()
+    CCWT.savefig() # save the figures
+
+    fig = figure(figsize=(5.5, 5))
+    fig.clf()
+
+    mean = kdata.iloc[0:n,2:].mean(axis=0)
+    chi = mean / k**3
+    Results = np.column_stack((k, chi))
+    np.savetxt(('mean_chi') + '.txt', Results, fmt='%s', delimiter='\t') # Save the data
+
+    plt.plot(k, mean, '-', color = color[0], marker = marker[0], markersize=6, label='mean')
+    plt.xlabel(r'$x: k \,(\AA^{-1})$', fontsize = 26) 
+    plt.ylabel(r'$y: k^3\chi(k) \, (\AA^{-3})$', fontsize = 26)
+    plt.tick_params(axis='x', labelsize=22)
+    plt.xticks(rotation=30)
+    plt.xticks(np.arange(1, 13, 1.0))
+    plt.tick_params(axis='y',       # changes apply to the x-axis
+        which='both',               # both major and minor ticks are affected
+        left='off',                 # ticks along the bottom edge are off
+        right='off',                # ticks along the top edge are off
+        labelleft='off')
+    plt.xlim(kmin,kmax)
+    plt.legend(fontsize = 22)
+
+    fig.tight_layout()
+    CCWT.savefig() # save the figures
+    
+    
+    for i in range(4): # range
+        fig = figure(figsize=(15, 5))
+        fig.clf()
+
+        plt.subplot(1,3,1)
+        plt.plot(k, F[i], '-', color = color[i], marker = marker[i], markersize=5, label='PC #%d' %(i+1))
+        chi = F[i] / k**3
+        Results = np.column_stack((k, chi))
+        np.savetxt(('PC%d_chi' %(i+1)) + '.txt', Results, fmt='%s', delimiter='\t') # Save the data
+
+        plt.xlabel(r'$x: k \,(\AA^{-1})$', fontsize = 24) 
+        plt.ylabel(r'$y: k^3\chi(k) \, (\AA^{-3})$', fontsize = 24)
+        plt.tick_params(axis='both', labelsize=22)
+        plt.xticks(rotation=30)
+        plt.xticks(np.arange(2, 13, 2.0))
+        plt.xlim(kmin,kmax)
+    #   plt.legend(frontsize=21)
+    
+
+        prMatrix_Cauchy = np.empty((325,4))
+        R, Cauchy = cauchy_wavelet(k = k, chi = F[i], kweight = 0, rmax_out = Rmax, nfft = 2048)
+        extent = [kmin, kmax, Rmin, Rmax]
+
+        plt.subplot(1,3,2)
+        im = plt.imshow(np.abs(Cauchy), interpolation='nearest', origin='lower', extent=extent, aspect='auto', vmin=0, vmax=0.0035)
+        contour = plt.contour(np.abs(Cauchy), hold='on', colors='k', origin='lower', extent=extent)
+        plt.ylim(0,6)
+        plt.xticks(rotation=30)
+        plt.xticks(np.arange(2, 13, 2.0))
+        plt.xlabel(r'$x: k \,(\AA^{-1})$', fontsize = 24) 
+        plt.ylabel(r'$y: R+\Delta \, (\AA)$', fontsize = 24)
+        plt.tick_params(axis='both', labelsize=22)
+
+        prArray_Cauchy = np.abs(Cauchy).sum(axis=1)
+        prArray_Cauchy = prArray_Cauchy / max(prArray_Cauchy)
+        prMatrix_Cauchy[:,i] = prArray_Cauchy
+
+        plt.subplot(1,3,3)
+        plt.plot(prMatrix_Cauchy[:,i], R,'-', color = color[i], marker = marker[i], markersize=5, label='PC #%d' %(i+1))
+        plt.ylabel(r'$y: R+\Delta \, (\AA)$', fontsize = 24)
+        plt.xlabel(r'$x: FT-magnitude $', fontsize = 24) 
+        plt.tick_params(axis='both', labelsize=22)
+        plt.ylim(0,6)
+        plt.xlim(0,1.2)
+        plt.legend(fontsize = 21)
+    
+  
+        fig.tight_layout()
+        CCWT.savefig() # save the figures
+
+    fig = figure(figsize=(5.5, 5))
+    fig.clf()
+
+    for i in range(4):
+        plt.plot(k, percent[i]*F[i], '-', color = color[i], marker = marker[i], markersize=5, label='PC #%d x contribution' %(i+1))
+    plt.xlabel(r'$x: k \,(\AA^{-1})$', fontsize = 20) 
+    plt.ylabel(r'$y: k^3\chi(k) \, (\AA^{-3})$', fontsize = 20)
+    plt.tick_params(axis='both', labelsize=18)
+    plt.xticks(rotation=30)
+    plt.xticks(np.arange(2, 13, 1.0))
+    plt.xlim(kmin,kmax)
+  #   plt.legend()
+
+    fig.tight_layout()
+
+    CCWT.savefig() # save the figures
+
+    fig = figure(figsize=(8, 8))
+    fig.clf()
+
+    for i in range(4):
+        plt.subplot(2,2,i+1)
+        R, Cauchy = cauchy_wavelet(k = k, chi = F[i], kweight = 0, rmax_out = Rmax, nfft = 2048)
+        extent = [kmin, kmax, Rmin, Rmax]
+        im = plt.imshow(np.abs(Cauchy)*percent[i], interpolation='nearest', origin='lower', extent=extent, aspect='auto', vmin=0, vmax=0.0006)
+        contour = plt.contour(np.abs(Cauchy), hold='on', colors='k', origin='lower', extent=extent)
+        plt.ylim(0,6)
+        plt.xticks(rotation=30)
+        plt.xticks(np.arange(2, 13, 2.0))
+        plt.xlabel(r'$x: k \,(\AA^{-1})$', fontsize = 20) 
+        plt.ylabel(r'$y: R+\Delta \, (\AA)$', fontsize = 20)
+        plt.tick_params(axis='both', labelsize=18)
+
+    fig.tight_layout()
+
+    CCWT.savefig() # save the figures
+
+    fig = figure(figsize=(5.5, 5))
+    fig.clf()
+
+    for i in range(4):
+        plt.plot(R, prMatrix_Cauchy[:,i]*percent[i], '-', color = color[i], marker = marker[i], markersize=5, label='PC #%d' %(i+1))
+    plt.xlabel(r'$x: R+\Delta \, (\AA)$', fontsize = 22)
+    plt.ylabel(r'$y: FT-magnitude $', fontsize = 22) 
+    plt.tick_params(axis='both', labelsize=20)
+    plt.xlim(0,10)
+    lgnd = plt.legend(fontsize = 20, labelspacing = 0.3)
+    lgnd.legendHandles[0]._legmarker.set_markersize(7)
+    lgnd.legendHandles[1]._legmarker.set_markersize(7)
+    lgnd.legendHandles[2]._legmarker.set_markersize(8)
+    lgnd.legendHandles[3]._legmarker.set_markersize(8)
+
+    fig.tight_layout()
+    CCWT.savefig() # save the figures 
+
+else:
+    F = np.empty((n,M,N))
+
+    for i in range(0,4):
+        for j in range(0,M):
+            F[i, j, :] = V[i, j*N:(j+1)*N]
+
+    # plot the first 4 PCs
+    fig = figure(figsize=(5, 5))
+    fig.clf()
+
+    for i in range(0,4):
+        plt.subplot(2, 2, i+1)
+        extent = [kmin, kmax, R[P], R[P+M-1]]
+        im = plt.imshow(F[i,:,:], interpolation='nearest', origin='lower', extent=extent, aspect='auto')
+        contour = plt.contour(F[i,:,:], hold='on', colors='k', origin='lower', extent=extent)
+        plt.xlabel(r'$x: k \,(\AA^{-1})$', fontsize = 18) 
+        plt.xlabel(r'$y: R+\Delta \, (\AA)$', fontsize = 18)
+        plt.tick_params(axis='both', labelsize=15)
+    
+    fig.tight_layout()
+    CCWT.savefig() # save the figures
+    fig = figure(figsize=(5, 5))
+    fig.clf()
+
+    if tt == 0:
+        plt.plot(R[P:(P+M)], F[0,:,:].sum(axis=1), 'o-', color = 'b', label = "PC1")
+        plt.plot(R[P:(P+M)], F[1,:,:].sum(axis=1), 'o-', color = 'r', label = "PC2")
+        plt.plot(R[P:(P+M)], F[2,:,:].sum(axis=1), 'o-', color = 'g', label = "PC3")
+        plt.plot(R[P:(P+M)], F[3,:,:].sum(axis=1), 'o-', color = 'k', label = "PC4")
+        if gg == 1:
+            plt.xlim(0,2)
+        elif gg == 2:
+            plt.xlim(2,4)        
+        plt.xlabel(r'$x: R-space \, (\AA)$', fontsize = 18) 
+        plt.ylabel(r'$y: |\chi(R)| \, (\AA^{-5})$', fontsize = 18)
+    else:
+        plt.plot(k, F[0,:,:].sum(axis=0), 'o-', color = 'b', label = "PC1")
+        plt.plot(k, F[1,:,:].sum(axis=0), 'o-', color = 'r', label = "PC2")
+        plt.plot(k, F[2,:,:].sum(axis=0), 'o-', color = 'g', label = "PC3")
+        plt.plot(k, F[3,:,:].sum(axis=0), 'o-', color = 'k', label = "PC4")
+        plt.xlim(kmin,kmax)
+        plt.xlabel(r'$x: k-space \,(\AA^{-1})$', fontsize = 18) 
+        plt.ylabel(r'$y: k^3\chi(k) \, (\AA^{-3})$', fontsize = 18)
+
+    plt.tick_params(axis='both', labelsize=15)
+    plt.legend(loc = 'best')
+
+    fig.tight_layout()
+    CCWT.savefig() # save the figures
+    fig = figure(figsize=(5, 5))
+    fig.clf()
+
+    if tt == 0:
+        plt.plot(R[P:(P+M)], percent[0]*(F[0,:,:].sum(axis=1)), 'o-', color = 'b', label = "PC1 x contribution")
+        plt.plot(R[P:(P+M)], percent[1]*(F[1,:,:].sum(axis=1)), 'o-', color = 'r', label = "PC2 x contribution")
+        plt.plot(R[P:(P+M)], percent[2]*(F[2,:,:].sum(axis=1)), 'o-', color = 'g', label = "PC3 x contribution")
+        plt.plot(R[P:(P+M)], percent[3]*(F[3,:,:].sum(axis=1)), 'o-', color = 'k', label = "PC4 x contribution")
+        if gg == 1:
+            plt.xlim(0,2)
+        elif gg == 2:
+            plt.xlim(2,4)        
+        plt.xlabel(r'$x: R-space \, (\AA)$', fontsize = 18) 
+        plt.ylabel(r'$y: |\chi(R)| \, (\AA^{-5})$', fontsize = 18)
+    else:
+        plt.plot(k, percent[0]*(F[0,:,:].sum(axis=0)), 'o-', color = 'b', label = "PC1 x contribution")
+        plt.plot(k, percent[1]*(F[1,:,:].sum(axis=0)), 'o-', color = 'r', label = "PC2 x contribution")
+        plt.plot(k, percent[2]*(F[2,:,:].sum(axis=0)), 'o-', color = 'g', label = "PC3 x contribution")
+        plt.plot(k, percent[3]*(F[3,:,:].sum(axis=0)), 'o-', color = 'k', label = "PC4 x contribution")
+        plt.xlim(kmin,kmax)
+        plt.xlabel(r'$x: k-space \,(\AA^{-1})$', fontsize = 18) 
+        plt.ylabel(r'$y: k^3\chi(k) \, (\AA^{-3})$', fontsize = 18)
+    
+    plt.tick_params(axis='both', labelsize=15)
+    plt.legend(loc = 'best')
+
+    fig.tight_layout()
+    CCWT.savefig() # save the figures
+    
+    
+################################################################################################################################
+##                                             how samples and STDs load on PC axes                                           ##
+################################################################################################################################
+
+# this will return a 2d array of the sample data projected into PCA space
+L_array = np.dot(U, S)
+
+x = []
+y = []
+z = []
+w = []
+for item in L_array:
+ x.append(item[0])
+ y.append(item[1])
+ z.append(item[2])
+ w.append(item[3])
+
+# loadings of Fe standards on the PC axes
+if ff == 1:
+    STD_array = kdata.iloc[(n-16):n,2:]
+    L_STD_array = np.dot(STD_array, np.linalg.pinv(V, rcond=1e-15))    
+else:
+    L_STD_array = np.dot(STD_Cauchy, np.linalg.pinv(V, rcond=1e-15))
+
+# add this loading array to the loading array of samples
+# and then add them to the other data DataFrame and start to draw figures
+x = np.vstack((np.array(x).reshape(n-16,1), L_STD_array[0:, 0].reshape(16,1)))
+y = np.vstack((np.array(y).reshape(n-16,1), L_STD_array[0:, 1].reshape(16,1)))
+z = np.vstack((np.array(z).reshape(n-16,1), L_STD_array[0:, 2].reshape(16,1)))
+w = np.vstack((np.array(w).reshape(n-16,1), L_STD_array[0:, 3].reshape(16,1)))
+
+odata['PC1score'] = Series(x.ravel())
+odata['PC2score'] = Series(y.ravel())
+odata['PC3score'] = Series(z.ravel())
+odata['PC4score'] = Series(w.ravel())
+
+# save the PC score data into other data file and save a new csv file
+odata.to_csv('YinchuanV3 loadings.csv')
+
+fig = figure(figsize=(8, 6))
+fig.clf()
+
+plt.scatter(odata[odata.Site=='YCA'].PC1score, odata[odata.Site=='YCA'].PC2score, facecolor = 'gold', edgecolor = 'k', marker = '^', s = 50, label = 'YCA site')
+plt.scatter(odata[odata.Site=='beforeYCA'].PC1score, odata[odata.Site=='beforeYCA'].PC2score, facecolor = 'orange', edgecolor = 'k', marker = 's', s = 70, label = 'YCA before @screen depth')
+plt.scatter(odata[odata.Site=='afterYCA'].PC1score, odata[odata.Site=='afterYCA'].PC2score, facecolor = 'r', edgecolor = 'k', marker = 's', s = 70, label = 'YCA after @screen depth')
+plt.scatter(odata[odata.Site=='YCB'].PC1score, odata[odata.Site=='YCB'].PC2score, facecolor = 'aqua', edgecolor = 'k', marker = 'v', s = 50, label = 'YCB site')
+plt.scatter(odata[odata.Site=='beforeYCB'].PC1score, odata[odata.Site=='beforeYCB'].PC2score, facecolor = 'skyblue', edgecolor = 'k', marker = 'D', s = 70, label = 'YCB before @screen depth')
+plt.scatter(odata[odata.Site=='afterYCB'].PC1score, odata[odata.Site=='afterYCB'].PC2score, facecolor = 'navy', edgecolor = 'k', marker = 'D', s = 70, label = 'YCB after @screen depth')
+            
+# label the axes 
+plt.xlabel("x: PC #1 loading", fontsize = 22) 
+plt.ylabel("y: PC #2 loading", fontsize = 22)
+plt.tick_params(axis='x', labelsize=20)
+plt.tick_params(axis='y', labelsize=20)
+lgnd = plt.legend(loc='best', fontsize = 16, scatterpoints=1, labelspacing = 0.3, borderaxespad = 0.2, handletextpad = 0.1)
+lgnd.legendHandles[0]._sizes = [60]
+lgnd.legendHandles[1]._sizes = [65]
+lgnd.legendHandles[2]._sizes = [50]
+#plt.title("The score of PC axis # 1 and 2 in each measurement\n", fontsize=22)
+
+fig.tight_layout()
+CCWT.savefig() # save the figures
+
+# PCA2vsPCA1 -> how to subplot? 2019-9-8
+# Separate!
+
+color = ['dimgray', 'gold', 'aqua', 'r', 'navy', 'orange', 'skyblue', 'g', 'b', 'gold']
+marker = ['o', '^', 'v', 's', 'D', 's', 'D', 'd', 's']
+#
+#
+size = [50, 40, 40, 60, 60, 60, 60]
+label = ['Fe STD', 'YCA', 'YCB', 'YCA-post@screen', 'YCB-post@screen', 'YCA-pre@screen', 'YCB-pre@screen']
+
+fig = figure(figsize=(15, 15))
+fig.clf()
+
+ii = 0
+
+#Site: STD, YCA, YCB, afterYCA, afterYCB, beforeYCA, beforeYCB
+for Site, group in odata.groupby(odata.Site):
+    plt.subplot(3,3,ii+1)
+
+    iii = 0
+#i=0 -> Fe std
+    if ii == 0: #ii=2 in Jing's model -> the 3rd one -> Fe STD!
+         plt.scatter(group.PC1score, group.PC2score, color = color[ii], marker = marker[ii], s = 60, label = 'Fe STD')
+         for name, xx, yy in zip(group.ID, group.PC1score, group.PC2score):
+            plt.annotate(name, xy = (xx, yy), xytext = (5, 2), textcoords = 'offset points', ha = 'left', va = 'top', fontsize=8.5)
+#i=1 or 3 or 5 -> YCA, aferYCA, before YCA
+    else:
+        if ii == 1 or 3 or 5:
+            plt.scatter(group.PC1score, group.PC2score, color = color[ii], marker = marker[ii], s = 60)
+        for name, xx, yy in zip(group.ID, group.PC1score, group.PC2score):
+            plt.annotate(name, xy = (xx, yy), xytext = (5, 2), textcoords = 'offset points', ha = 'left', va = 'top', fontsize=8.5)
+            #for texture, subgroup in subgroup.groupby(subgroup.textture):
+                #plt.scatter(subgroup.PC1score, subgroup.PC2score,facecolors = colors[iii], edgecolors = color[ii], marker = markers[iii], s = sizes[iii])
+            #iii = iii + 1
+                
+        else:
+            colors = [color[ii], '0.9', color[ii], '0.9']
+            markers = ['*', '*', 's', 's']
+            sizes = [60, 60, 40, 40]
+        #for ID, subgroup in subgroup.groupby(subgroup.ID):
+            #for ID, subsubgroup in subgroup.groupby(subgroup.ID):
+            #plt.scatter(subgroup.PC1score, subgroup.PC2score,
+            #facecolors = colors[iii], edgecolors = color[ii], marker = markers[iii], s = sizes[iii])
+        iii = iii + 1
+
+    plt.xlabel("x: PC #1 loading", fontsize = 18) 
+    plt.ylabel("y: PC #2 loading", fontsize = 18)
+    plt.tick_params(axis='x', labelsize=16)
+    plt.tick_params(axis='y', labelsize=16)
+    plt.subplots_adjust(top = 1.0, wspace = 0.3, hspace = 0.3)
+
+    ii = ii + 1
+
+plt.suptitle('''PC1 VS PC2 loading
+(Fe STD; YCA; YCB; afterYCA; after YCB; beforeYCA, beforeYCB;)\n''', fontsize=18)
+#plt.suptitle('''PC1 VS PC2 loading
+#(blue: PCA-pre; green: Vietnam; red: Cambodia; black: Fe STD)\n''', fontsize=19)
+#[star: clay; square: sand; filled: Holocene; open: Pleistocene]\n''', fontsize=19)
+fig.tight_layout()
+CCWT.savefig() # save the figures
+
+
+# PCA3vsPCA2 -> how to subplot? 2019-9-9
+color = ['dimgray', 'gold', 'aqua', 'r', 'navy', 'orange', 'skyblue', 'g', 'b', 'gold']
+marker = ['o', '^', 'v', 's', 'D', 's', 'D', 'd', 's']
+size = [50, 40, 40, 60, 60, 60, 60]
+label = ['Fe STD', 'YCA', 'YCB', 'YCA-post@screen', 'YCB-post@screen', 'YCA-pre@screen', 'YCB-pre@screen']
+
+fig = figure(figsize=(15, 15))
+fig.clf()
+ii = 0
+
+#Site: STD, YCA, YCB, afterYCA, afterYCB, beforeYCA, beforeYCB
+for Site, group in odata.groupby(odata.Site):
+    plt.subplot(3,3,ii+1)
+
+    iii = 0
+#i=0 -> Fe std
+    if ii == 0: #ii=2 in Jing's model -> the 3rd one -> Fe STD!
+         plt.scatter(group.PC2score, group.PC3score, color = color[ii], marker = marker[ii], s = 60, label = 'Fe STD')
+         for name, xx, yy in zip(group.ID, group.PC2score, group.PC3score):
+            plt.annotate(name, xy = (xx, yy), xytext = (5, 2), textcoords = 'offset points', ha = 'left', va = 'top', fontsize=8.5)
+#i=1 or 3 or 5 -> YCA, aferYCA, before YCA
+    else:
+        if ii == 1 or 3 or 5:
+            plt.scatter(group.PC2score, group.PC3score, color = color[ii], marker = marker[ii], s = 60)
+        for name, xx, yy in zip(group.ID, group.PC2score, group.PC3score):
+            plt.annotate(name, xy = (xx, yy), xytext = (5, 2), textcoords = 'offset points', ha = 'left', va = 'top', fontsize=8.5)
+            #for texture, subgroup in subgroup.groupby(subgroup.textture):
+                #plt.scatter(subgroup.PC1score, subgroup.PC2score,facecolors = colors[iii], edgecolors = color[ii], marker = markers[iii], s = sizes[iii])
+            #iii = iii + 1
+                
+        else:
+            colors = [color[ii], '0.9', color[ii], '0.9']
+            markers = ['*', '*', 's', 's']
+            sizes = [60, 60, 40, 40]
+        #for ID, subgroup in subgroup.groupby(subgroup.ID):
+            #for ID, subsubgroup in subgroup.groupby(subgroup.ID):
+            #plt.scatter(subgroup.PC1score, subgroup.PC2score,
+            #facecolors = colors[iii], edgecolors = color[ii], marker = markers[iii], s = sizes[iii])
+        iii = iii + 1
+
+    plt.xlabel("x: PC #2 loading", fontsize = 18) 
+    plt.ylabel("y: PC #3 loading", fontsize = 18)
+    plt.tick_params(axis='x', labelsize=16)
+    plt.tick_params(axis='y', labelsize=16)
+    plt.subplots_adjust(top = 1.0, wspace = 0.3, hspace = 1.0)
+
+    ii = ii + 1
+
+plt.suptitle('PC2 VS PC3 loading', fontsize=18)
+
+
+fig.tight_layout()
+CCWT.savefig() # save the figures
+
+#plt.close()
+#CCWT.close()
+
+#2019-09-09 
+
+# plot other data VS PC loadings for all samples
+
+markers = ['^', 'v', 's', 'D', 's', 'D'] #Line670
+
+def shiftedColorMap(cmap, start=0, midpoint=0.5, stop=1.0, name='shiftedcmap'):
+    #Function to offset the "center" of a colormap. Useful for
+    #data with a negative min and positive max and you want the
+    #middle of the colormap's dynamic range to be at zero
+
+    #Input
+    
+      #cmap : The matplotlib colormap to be altered
+      #start : Offset from lowest point in the colormap's range.
+          #Defaults to 0.0 (no lower ofset). Should be between
+          #0.0 and 1.0.
+      #midpoint : The new center of the colormap. Defaults to 
+          #0.5 (no shift). Should be between 0.0 and 1.0. In
+          #general, this should be  1 - vmax/(vmax + abs(vmin))
+          #For example if your data range from -15.0 to +5.0 and
+          #you want the center of the colormap at 0.0, `midpoint`
+          #should be set to  1 - 5/(5 + 15)) or 0.75
+      #stop : Offset from highets point in the colormap's range.
+          #Defaults to 1.0 (no upper ofset). Should be between
+          #0.0 and 1.0.
+    #
+    cdict = {
+        'red': [],
+        'green': [],
+        'blue': [],
+        'alpha': []
+    }
+
+    # regular index to compute the colors
+    reg_index = np.linspace(start, stop, 257) #what is 257？
+
+    # shifted index to match the data
+    shift_index = np.hstack([
+        np.linspace(0.0, midpoint, 128, endpoint=False), 
+        np.linspace(midpoint, 1.0, 129, endpoint=True)
+    ])
+
+    for ri, si in zip(reg_index, shift_index):
+        r, g, b, a = cmap(ri)
+
+        cdict['red'].append((si, r, r))
+        cdict['green'].append((si, g, g))
+        cdict['blue'].append((si, b, b))
+        cdict['alpha'].append((si, a, a))
+
+    newcmap = mpl.colors.LinearSegmentedColormap(name, cdict)
+    plt.register_cmap(cmap=newcmap)
+
+    return newcmap
+
+color_cmap = shiftedColorMap(mpl.cm.RdGy_r, midpoint=0.3, name='shifted')
+Xlf_cmap = shiftedColorMap(mpl.cm.jet, midpoint=0.2, name='shifted')
+Xfd_cmap = shiftedColorMap(mpl.cm.jet, midpoint=0.2, name='shifted')
+SIRM_cmap = shiftedColorMap(mpl.cm.jet, midpoint=0.2, name='shifted')
+Sampledepth_camp = shiftedColorMap(mpl.cm.jet, midpoint=0.4, name='shifted')
+FeIIpercent_camp = shiftedColorMap(mpl.cm.jet, midpoint=0.2, name='shifted')
+# i dont have coloridx
+
+#odata_new = odata[odata.ColorIdx != -100]
+
+#fig = figure(figsize=(6.5, 5))
+#fig.clf()
+
+#plt.scatter(odata.PC1score[0:n-16], odata.PC2score[0:n-16], facecolors = 'none', edgecolors = 'k', s = 10)
+
+#CO = plt.scatter(odata_new.PC1score, odata_new.PC2score, c = odata_new.ColorIdx, s = 85, cmap = color_cmap)
+#COL = plt.colorbar(CO, shrink=0.9, pad=.1, aspect=16)
+#COL.set_label(r'$\Delta R (530nm - 520nm)$', labelpad=-70, fontsize=19)
+#for t in COL.ax.get_yticklabels():
+#     t.set_fontsize(17)
+
+#plt.xlabel("x: PC #1 loading", fontsize = 22) 
+#plt.ylabel("y: PC #2 loading", fontsize = 22)
+#plt.tick_params(axis='x', labelsize=20)
+#plt.tick_params(axis='y', labelsize=20)
+#plt.title("The score of PC axis # 1 and 2 with color info\n", fontsize=22)
+
+#fig.tight_layout()
+#CCWT.savefig() # save the figures 
+
+# add depth info to the 2D plot
+
+odata_new = odata[odata.Sampledepth != -100]
+
+fig = figure(figsize=(6.5, 5))
+fig.clf()
+
+plt.scatter(odata.PC1score[0:n-16], odata.PC2score[0:n-16], facecolors = 'none', edgecolors = 'k', s = 10)
+
+CO = plt.scatter(odata_new.PC1score, odata_new.PC2score, c = odata_new.Sampledepth, s = 85, cmap = SIRM_cmap)
+COL = plt.colorbar(CO, shrink=0.9, pad=.1, aspect=16)
+COL.set_label('Sample depth', labelpad=-70, fontsize=19)
+for t in COL.ax.get_yticklabels():
+     t.set_fontsize(17)
+
+plt.xlabel("x: PC #1 loading", fontsize = 22) 
+plt.ylabel("y: PC #2 loading", fontsize = 22)
+plt.tick_params(axis='x', labelsize=20)
+plt.tick_params(axis='y', labelsize=20)
+
+plt.title('The score of PC axis # 1 and 2 with depth.\n', fontsize=22)
+
+fig.tight_layout()
+CCWT.savefig() # save the figures
+
+
+# add FeIIpercent
+odata_new = odata[odata.FeIIpercent != -100]
+
+fig = figure(figsize=(6.5, 5))
+fig.clf()
+
+plt.scatter(odata.PC1score[0:n-16], odata.PC2score[0:n-16], facecolors = 'none', edgecolors = 'k', s = 10)
+
+CO = plt.scatter(odata_new.PC1score, odata_new.PC2score, c = odata_new.FeIIpercent, s = 85, cmap = SIRM_cmap)
+COL = plt.colorbar(CO, shrink=0.9, pad=.1, aspect=16)
+COL.set_label('FeII percent', labelpad=-70, fontsize=19)
+for t in COL.ax.get_yticklabels():
+     t.set_fontsize(17)
+
+plt.xlabel("x: PC #1 loading", fontsize = 22) 
+plt.ylabel("y: PC #2 loading", fontsize = 22)
+plt.tick_params(axis='x', labelsize=20)
+plt.tick_params(axis='y', labelsize=20)
+
+plt.title('The score of PC axis # 1 and 2 with FeII percent.\n', fontsize=22)
+
+fig.tight_layout()
+CCWT.savefig() # save the figures
+
+
+# add Xlf info to the 2D plot
+
+odata_new = odata[odata.Xlf != -100]
+
+fig = figure(figsize=(6.5, 5))
+fig.clf()
+
+plt.scatter(odata.PC1score[0:n-16], odata.PC2score[0:n-16], facecolors = 'none', edgecolors = 'k', s = 10)
+
+CO = plt.scatter(odata_new.PC1score, odata_new.PC2score, c = odata_new.Xlf, s = 85, cmap = Xlf_cmap)
+COL = plt.colorbar(CO, shrink=0.9, pad=.1, aspect=16)
+COL.set_label('Xlf', labelpad=-70, fontsize=19)
+for t in COL.ax.get_yticklabels():
+     t.set_fontsize(17)
+
+plt.xlabel("x: PC #1 loading", fontsize = 22) 
+plt.ylabel("y: PC #2 loading", fontsize = 22)
+plt.tick_params(axis='x', labelsize=20)
+plt.tick_params(axis='y', labelsize=20)
+
+plt.title('The score of PC axis # 1 and 2 with Xlf.\n', fontsize=22)
+
+fig.tight_layout()
+CCWT.savefig() # save the figures
+
+# add Xfd info to the 2D plot
+
+odata_new = odata[odata.Xfd != -100]
+
+fig = figure(figsize=(6.5, 5))
+fig.clf()
+
+plt.scatter(odata.PC1score[0:n-16], odata.PC2score[0:n-16], facecolors = 'none', edgecolors = 'k', s = 10)
+
+CO = plt.scatter(odata_new.PC1score, odata_new.PC2score, c = odata_new.Xlf, s = 85, cmap = Xlf_cmap)
+COL = plt.colorbar(CO, shrink=0.9, pad=.1, aspect=16)
+COL.set_label('Xfd', labelpad=-70, fontsize=19)
+for t in COL.ax.get_yticklabels():
+     t.set_fontsize(17)
+
+plt.xlabel("x: PC #1 loading", fontsize = 22) 
+plt.ylabel("y: PC #2 loading", fontsize = 22)
+plt.tick_params(axis='x', labelsize=20)
+plt.tick_params(axis='y', labelsize=20)
+
+plt.title('The score of PC axis # 1 and 2 with Xfd.\n', fontsize=22)
+
+fig.tight_layout()
+CCWT.savefig() # save the figures
+
+
+# add SIRM info to the 2D plot
+
+odata_new = odata[odata.SIRM != -100]
+
+fig = figure(figsize=(6.5, 5))
+fig.clf()
+
+plt.scatter(odata.PC1score[0:n-16], odata.PC2score[0:n-16], facecolors = 'none', edgecolors = 'k', s = 10)
+
+CO = plt.scatter(odata_new.PC1score, odata_new.PC2score, c = odata_new.SIRM, s = 85, cmap = SIRM_cmap)
+COL = plt.colorbar(CO, shrink=0.9, pad=.1, aspect=16)
+COL.set_label('SIRM', labelpad=-70, fontsize=19)
+for t in COL.ax.get_yticklabels():
+     t.set_fontsize(17)
+
+plt.xlabel("x: PC #1 loading", fontsize = 22) 
+plt.ylabel("y: PC #2 loading", fontsize = 22)
+plt.tick_params(axis='x', labelsize=20)
+plt.tick_params(axis='y', labelsize=20)
+
+plt.title('The score of PC axis # 1 and 2 with SIRM.\n', fontsize=22)
+
+fig.tight_layout()
+CCWT.savefig() # save the figures
+
+plt.close()
+CCWT.close()
